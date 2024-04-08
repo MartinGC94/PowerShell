@@ -789,16 +789,24 @@ namespace System.Management.Automation
                     // don't show set, we won't show any of the common parameters either.
                     bool showToUser = true;
                     var compiledAttributes = param.Parameter.CompiledAttributes;
+                    string helptext = string.Empty;
                     if (compiledAttributes != null && compiledAttributes.Count > 0)
                     {
                         foreach (var attr in compiledAttributes)
                         {
-                            var pattr = attr as ParameterAttribute;
-                            if (pattr != null && pattr.DontShow)
+                            if (attr is ParameterAttribute pattr)
                             {
-                                showToUser = false;
-                                addCommonParameters = false;
-                                break;
+                                if (!string.IsNullOrEmpty(pattr.HelpMessage))
+                                {
+                                    helptext = '\n' + pattr.HelpMessage;
+                                }
+
+                                if (pattr.DontShow)
+                                {
+                                    showToUser = false;
+                                    addCommonParameters = false;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -806,7 +814,7 @@ namespace System.Management.Automation
                     if (showToUser)
                     {
                         string completionText = "-" + name + colonSuffix;
-                        string tooltip = type + name;
+                        string tooltip = type + name + helptext;
                         listInUse.Add(new CompletionResult(completionText, name, CompletionResultType.ParameterName,
                                                            tooltip));
                     }
