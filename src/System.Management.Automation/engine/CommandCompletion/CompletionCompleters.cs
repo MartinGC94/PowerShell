@@ -578,11 +578,11 @@ namespace System.Management.Automation
             {
                 case PseudoBindingInfoType.PseudoBindingFail:
                     // The command is a cmdlet or script cmdlet. Binding failed
-                    result = GetParameterCompletionResults(partialName, uint.MaxValue, pseudoBinding.UnboundParameters, withColon);
+                    result = GetParameterCompletionResults(partialName, uint.MaxValue, pseudoBinding.UnboundParameters, withColon, context, pseudoBinding.CommandInfo);
                     break;
                 case PseudoBindingInfoType.PseudoBindingSucceed:
                     // The command is a cmdlet or script cmdlet. Binding succeeded.
-                    result = GetParameterCompletionResults(partialName, pseudoBinding, parameterAst, withColon);
+                    result = GetParameterCompletionResults(partialName, pseudoBinding, parameterAst, withColon, context);
                     break;
             }
 
@@ -603,8 +603,14 @@ namespace System.Management.Automation
         /// <param name="bindingInfo"></param>
         /// <param name="parameterAst"></param>
         /// <param name="withColon"></param>
+        /// <param name="context"></param>
         /// <returns></returns>
-        private static List<CompletionResult> GetParameterCompletionResults(string parameterName, PseudoBindingInfo bindingInfo, CommandParameterAst parameterAst, bool withColon)
+        private static List<CompletionResult> GetParameterCompletionResults(
+            string parameterName,
+            PseudoBindingInfo bindingInfo,
+            CommandParameterAst parameterAst,
+            bool withColon,
+            CompletionContext context)
         {
             Diagnostics.Assert(bindingInfo.InfoType.Equals(PseudoBindingInfoType.PseudoBindingSucceed), "The pseudo binding should succeed");
             List<CompletionResult> result = new List<CompletionResult>();
@@ -615,7 +621,9 @@ namespace System.Management.Automation
                     parameterName,
                     bindingInfo.ValidParameterSetsFlags,
                     bindingInfo.UnboundParameters,
-                    withColon);
+                    withColon,
+                    context,
+                    bindingInfo.CommandInfo);
                 return result;
             }
 
@@ -637,7 +645,9 @@ namespace System.Management.Automation
                         parameterName,
                         bindingInfo.ValidParameterSetsFlags,
                         bindingInfo.UnboundParameters,
-                        withColon);
+                        withColon,
+                        context,
+                        bindingInfo.CommandInfo);
                 }
 
                 return result;
@@ -652,7 +662,9 @@ namespace System.Management.Automation
                         parameterName,
                         bindingInfo.ValidParameterSetsFlags,
                         bindingInfo.BoundParameters.Values,
-                        withColon);
+                        withColon,
+                        context,
+                        bindingInfo.CommandInfo);
                 }
 
                 return result;
@@ -716,7 +728,9 @@ namespace System.Management.Automation
                     parameterName,
                     bindingInfo.ValidParameterSetsFlags,
                     bindingInfo.UnboundParameters,
-                    withColon);
+                    withColon,
+                    context,
+                    bindingInfo.CommandInfo);
                 return result;
             }
 
@@ -757,17 +771,23 @@ namespace System.Management.Automation
         /// <param name="validParameterSetFlags"></param>
         /// <param name="parameters"></param>
         /// <param name="withColon"></param>
+        /// <param name="context"></param>
+        /// <param name="cmdInfo"></param>
         /// <returns></returns>
         private static List<CompletionResult> GetParameterCompletionResults(
             string parameterName,
             uint validParameterSetFlags,
             IEnumerable<MergedCompiledCommandParameter> parameters,
-            bool withColon)
+            bool withColon,
+            CompletionContext context,
+            CommandInfo cmdInfo)
         {
             var result = new List<CompletionResult>();
             var commonParamResult = new List<CompletionResult>();
             var pattern = WildcardPattern.Get(parameterName + "*", WildcardOptions.IgnoreCase);
             var colonSuffix = withColon ? ":" : string.Empty;
+
+            IDictionary<string, string> myParamInfo = GetParameterHelp(cmdInfo, context.ExecutionContext);
 
             bool addCommonParameters = true;
             foreach (MergedCompiledCommandParameter param in parameters)
@@ -809,6 +829,11 @@ namespace System.Management.Automation
                                 }
                             }
                         }
+                    }
+
+                    if (helptext == string.Empty && myParamInfo.TryGetValue(name, out string newHelpText))
+                    {
+                        helptext = '\n' + newHelpText;
                     }
 
                     if (showToUser)
@@ -868,6 +893,73 @@ namespace System.Management.Automation
             return ResourceManagerCache.GetResourceString(typeof(CompletionCompleters).Assembly,
                                                           "System.Management.Automation.resources.TabCompletionStrings",
                                                           op + "OperatorDescription");
+        }
+
+        internal static IDictionary<string, string> GetParameterHelp(CommandInfo cmdInfo, ExecutionContext context)
+        {
+            HelpInfo helpInfo = null;
+            if (cmdInfo is IScriptCommandInfo scriptCommand)
+            {
+                if (scriptCommand.ScriptBlock.Ast is FunctionDefinitionAst functionDefinition)
+                {
+                    CommentHelpInfo helpContent = functionDefinition.GetHelpContent();
+                    if (helpContent is not null && helpContent.Parameters.Count > 0)
+                    {
+                        return helpContent.Parameters;
+                    }
+                }
+
+                if (string.IsNullOrEmpty(cmdInfo.Name))
+                {
+                    return new Dictionary<string, string>();
+                }
+
+                var cache = new Dictionary<Ast, Token[]>();
+                helpInfo = scriptCommand.ScriptBlock.GetHelpInfo(
+                    context,
+                    cmdInfo,
+                    dontSearchOnRemoteComputer: true,
+                    cache,
+                    out _,
+                    out _);
+            }
+            else if (!string.IsNullOrEmpty(cmdInfo.Name))
+            {
+                HelpRequest request = new(cmdInfo.Name, HelpCategory.All)
+                {
+                    ProviderContext = new ProviderContext(
+                        context.SessionState.Path.CurrentLocation.Path,
+                        context,
+                        context.SessionState.Path)
+                };
+
+                helpInfo = context.HelpSystem.ExactMatchHelp(request).FirstOrDefault();
+            }
+
+            var result = new Dictionary<string, string>();
+            if (helpInfo is not null)
+            {
+                StringBuilder descriptionBuilder = new();
+                foreach (PSObject parameter in helpInfo.GetParameter("*"))
+                {
+                    if (parameter.Properties["description"]?.Value is not PSObject[] paragraphs)
+                    {
+                        continue;
+                    }
+
+                    descriptionBuilder.Length = 0;
+                    foreach (PSObject para in paragraphs)
+                    {
+                        string text = para.Properties["Text"].Value.ToString();
+                        _ = descriptionBuilder.AppendLine(text);
+                    }
+
+                    string paramName = parameter.Properties["name"].Value.ToString();
+                    result.Add(paramName, descriptionBuilder.ToString());
+                }
+            }
+
+            return result;
         }
 
         #endregion Command Parameters
