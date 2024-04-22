@@ -6971,6 +6971,302 @@ namespace System.Management.Automation
             return false;
         }
 
+        internal static List<CompletionResult> CompleteMethodParameter(InvokeMemberExpressionAst memberInvocation, CompletionContext context)
+        {
+            var resultList = new List<CompletionResult>();
+            if (memberInvocation.Member is not ExpressionAst memberExpression)
+            {
+                // Should never happen because the only CommandElement that isn't also an Expression is a CommandParameter
+                return resultList;
+            }
+
+            object memberValue = GetOrInferValueFromExpression(memberExpression, context.ExecutionContext);
+            if (memberValue is not string methodName || string.IsNullOrEmpty(methodName))
+            {
+                // Can't determine which method is called.
+                return resultList;
+            }
+
+            var inferredTypes = new List<PSTypeName>();
+            if (memberInvocation.Static)
+            {
+                if (memberInvocation.Expression is TypeExpressionAst typeExpression)
+                {
+                    inferredTypes.Add(new PSTypeName(typeExpression.TypeName));
+                }
+                else if (GetOrInferValueFromExpression(memberInvocation.Expression, context.ExecutionContext) is Type type)
+                {
+                    inferredTypes.Add(new PSTypeName(type));
+                }
+                else
+                {
+                    return resultList;
+                }
+            }
+            else
+            {
+                inferredTypes.AddRange(AstTypeInference.InferTypeOf(
+                    memberInvocation.Expression,
+                    context.TypeInferenceContext,
+                    TypeInferenceRuntimePermissions.AllowSafeEval));
+            }
+
+            string wordToComplete = context.WordToComplete;
+            wordToComplete ??= string.Empty;
+            int argCount = 0;
+            int positionalArgCount = 0;
+            var argumentNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (memberInvocation.Arguments is not null)
+            {
+                foreach (ExpressionAst argument in memberInvocation.Arguments)
+                {
+                    if (argument is LabeledExpressionAst labeled)
+                    {
+                        if (!argumentNames.Add(labeled.Label.Value))
+                        {
+                            // The user has entered the same parameter twice but we'll just ignore that.
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        positionalArgCount++;
+                    }
+
+                    argCount++;
+                }
+            }
+
+            bool isConstructor = memberInvocation.Static && "new".EqualsOrdinalIgnoreCase(methodName);
+            var processedTypeNames = new HashSet<PSTypeName>(inferredTypes);
+            var addedResults = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < inferredTypes.Count; i++)
+            {
+                PSTypeName typeName = inferredTypes[i];
+                if (typeName.Type is not null)
+                {
+                    resultList.AddRange(GetMethodParameterResults(
+                        typeName.Type,
+                        memberInvocation.Static,
+                        isConstructor,
+                        methodName,
+                        wordToComplete,
+                        argCount,
+                        positionalArgCount,
+                        argumentNames,
+                        addedResults));
+
+                    if (!isConstructor)
+                    {
+                        foreach (Type type in typeName.Type.GetInterfaces())
+                        {
+                            var interfaceType = new PSTypeName(type);
+                            if (processedTypeNames.Add(interfaceType))
+                            {
+                                inferredTypes.Add(interfaceType);
+                            }
+                        }
+                    }
+                }
+                else if (typeName.TypeDefinitionAst is not null)
+                {
+                    resultList.AddRange(GetMethodParameterResults(
+                        typeName.TypeDefinitionAst,
+                        memberInvocation.Static,
+                        isConstructor,
+                        methodName,
+                        wordToComplete,
+                        argCount,
+                        positionalArgCount,
+                        argumentNames,
+                        addedResults));
+
+                    if (!isConstructor)
+                    {
+                        foreach (TypeConstraintAst typeConstraint in typeName.TypeDefinitionAst.BaseTypes)
+                        {
+                            var baseType = new PSTypeName(typeConstraint.TypeName);
+                            if (processedTypeNames.Add(baseType))
+                            {
+                                inferredTypes.Add(baseType);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!isConstructor)
+            {
+                var objectType = new PSTypeName(typeof(object));
+                if (!processedTypeNames.Contains(objectType))
+                {
+                    resultList.AddRange(GetMethodParameterResults(
+                        objectType.Type,
+                        memberInvocation.Static,
+                        isConstructor,
+                        methodName,
+                        wordToComplete,
+                        argCount,
+                        positionalArgCount,
+                        argumentNames,
+                        addedResults));
+                }
+            }
+
+            return resultList;
+        }
+
+        private static IEnumerable<CompletionResult> GetMethodParameterResults(
+            Type type,
+            bool @static,
+            bool isConstructor,
+            string methodName,
+            string wordToComplete,
+            int argCount,
+            int positionalArgCount,
+            HashSet<string> argumentNames,
+            HashSet<string> addedResults)
+        {
+            MethodBase[] methods = isConstructor
+                ? type.GetConstructors()
+                : type.GetMethods();
+
+            foreach (MethodBase method in methods)
+            {
+                if (isConstructor != method.IsConstructor
+                    || (!isConstructor && (@static != method.IsStatic || !methodName.EqualsOrdinalIgnoreCase(method.Name))))
+                {
+                    continue;
+                }
+
+                ParameterInfo[] methodParams = method.GetParameters();
+                if (argCount > methodParams.Length)
+                {
+                    continue;
+                }
+
+                if (argumentNames.Count > 0)
+                {
+                    // Validate that this method overload is valid with the specified parameters
+                    var methodParamSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (ParameterInfo param in methodParams)
+                    {
+                        _ = methodParamSet.Add(param.Name);
+                    }
+
+                    if (!argumentNames.IsSubsetOf(methodParamSet))
+                    {
+                        continue;
+                    }
+                }
+
+                foreach (ParameterInfo param in methodParams)
+                {
+                    if (param.Position < positionalArgCount
+                        || !param.Name.StartsWith(wordToComplete, StringComparison.OrdinalIgnoreCase)
+                        || (argumentNames.Contains(param.Name) && !param.Name.EqualsOrdinalIgnoreCase(wordToComplete)))
+                    {
+                        continue;
+                    }
+
+                    if (addedResults.Add(param.Name))
+                    {
+                        string toolTip = param.IsIn || param.IsOut
+                            ? "[ref] " + '[' + ToStringCodeMethods.Type(param.ParameterType, dropNamespaces: true) + ']'
+                            : '[' + ToStringCodeMethods.Type(param.ParameterType, dropNamespaces: true) + ']';
+                        yield return new CompletionResult(param.Name + ':', param.Name, CompletionResultType.ParameterName, toolTip);
+                    }
+                }
+            }
+        }
+
+        private static IEnumerable<CompletionResult> GetMethodParameterResults(
+            TypeDefinitionAst typeDefinition,
+            bool @static,
+            bool isConstructor,
+            string methodName,
+            string wordToComplete,
+            int argCount,
+            int positionalArgCount,
+            HashSet<string> argumentNames,
+            HashSet<string> addedResults)
+        {
+            foreach (MemberAst member in typeDefinition.Members)
+            {
+                if (member is not FunctionMemberAst methodAst)
+                {
+                    continue;
+                }
+
+                if (argCount > methodAst.Parameters.Count
+                    || isConstructor != methodAst.IsConstructor
+                    || (!isConstructor && (@static != methodAst.IsStatic || !methodName.EqualsOrdinalIgnoreCase(methodAst.Name))))
+                {
+                    continue;
+                }
+
+                if (argumentNames.Count > 0)
+                {
+                    // Validate that this method overload is valid with the specified parameters
+                    var methodParamSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (ParameterAst param in methodAst.Parameters)
+                    {
+                        _ = methodParamSet.Add(param.Name.VariablePath.UserPath);
+                    }
+
+                    if (!argumentNames.IsSubsetOf(methodParamSet))
+                    {
+                        continue;
+                    }
+                }
+
+                for (int i = 0; i < methodAst.Parameters.Count; i++)
+                {
+                    ParameterAst parameter = methodAst.Parameters[i];
+                    string paramName = parameter.Name.VariablePath.UserPath;
+                    if (i < positionalArgCount
+                        || !paramName.StartsWith(wordToComplete, StringComparison.OrdinalIgnoreCase)
+                        || (argumentNames.Contains(paramName) && !paramName.EqualsOrdinalIgnoreCase(wordToComplete)))
+                    {
+                        continue;
+                    }
+
+                    if (addedResults.Add(paramName))
+                    {
+                        TypeConstraintAst paramType = null;
+                        foreach (AttributeBaseAst attribute in parameter.Attributes)
+                        {
+                            if (attribute is TypeConstraintAst typeConstraint)
+                            {
+                                paramType = typeConstraint;
+                                break;
+                            }
+                        }
+
+                        string toolTip;
+                        if (paramType is not null)
+                        {
+                            Type loadedType = paramType.TypeName.GetReflectionType();
+                            if (loadedType is null)
+                            {
+                                toolTip = '[' + paramType.TypeName.Name + ']';
+                            }
+                            else
+                            {
+                                toolTip = '[' + ToStringCodeMethods.Type(loadedType, dropNamespaces: true) + ']';
+                            }
+                        }
+                        else
+                        {
+                            toolTip = '[' + ToStringCodeMethods.Type(parameter.StaticType, dropNamespaces: true) + ']';
+                        }
+
+                        yield return new CompletionResult(paramName + ':', paramName, CompletionResultType.ParameterName, toolTip);
+                    }
+                }
+            }
+        }
+
         #endregion Members
 
         #region Types
@@ -8657,6 +8953,24 @@ namespace System.Management.Automation
 
                 return string.Compare(xName, yName, StringComparison.OrdinalIgnoreCase);
             }
+        }
+
+        internal static object GetOrInferValueFromExpression(ExpressionAst expression, ExecutionContext executionContext)
+        {
+            if (expression is ConstantExpressionAst constant)
+            {
+                return constant.Value;
+            }
+
+            _ = SafeExprEvaluator.TrySafeEval(expression, executionContext, out object result);
+            if (result is not null)
+            {
+                return result;
+            }
+
+            return null;
+            // TODO: Traverse the AST to infer the value of an expression with an earlier assignment, for example:
+            // $MyVar = "System32"; $MyPath = "C:\Windows\$MyVar\WindowsPowerShell"
         }
 
         #endregion Helpers

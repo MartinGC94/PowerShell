@@ -1178,6 +1178,126 @@ class InheritedClassTest : System.Attribute
         $res.CompletionMatches.CompletionText | Should -Contain 'HasFlag('
     }
 
+    Context "Method parameter name completion" {
+        It 'should complete method parameter name when <Intent>' -TestCases @(
+            @{
+                Intent = 'cursor is right after lparen'
+                Expected = 'key:', 'value:'
+                TestString = '@{}.Add(^'
+            }
+            @{
+                Intent = 'cursor is after lparen with space'
+                Expected = 'key:', 'value:'
+                TestString = '@{}.Add( ^'
+            }
+            @{
+                Intent = 'cursor is after lparen with newline'
+                Expected = 'key:', 'value:'
+                TestString = "@{}.Add(`n^"
+            }
+            @{
+                Intent = 'cursor is right after comma'
+                Expected = 'value:'
+                TestString = "@{}.Add('',^"
+            }
+            @{
+                Intent = 'cursor is after comma with space'
+                Expected = 'value:'
+                TestString = "@{}.Add('', ^"
+            }
+            @{
+                Intent = 'cursor is after comma with newline'
+                Expected = 'value:'
+                TestString = "@{}.Add('',`n^"
+            }
+        ) -Test {
+            param($Expected, $TestString)
+            $CursorIndex = $TestString.IndexOf('^')
+            $res = TabExpansion2 -cursorColumn $CursorIndex -inputScript $TestString.Remove($CursorIndex, 1)
+            $ExpectedString = $Expected -join ' '
+            $res.CompletionMatches.CompletionText -join ' ' | Should -BeExactly $ExpectedString
+        }
+
+        It 'Should replace existing colon' {
+            $TestString = "@{}.Add(key^:"
+            $CursorIndex = $TestString.IndexOf('^')
+            $res = TabExpansion2 -cursorColumn $CursorIndex -inputScript $TestString.Remove($CursorIndex, 1)
+            $Res.ReplacementIndex | Should -Be 8
+            $Res.ReplacementLength | Should -Be 4
+            $res.CompletionMatches[0].CompletionText | Should -BeExactly 'key:'
+        }
+
+        It 'Should complete the parametername in a complete invocation statement' {
+            $TestString = "@{}.Add(KEY^:'')"
+            $CursorIndex = $TestString.IndexOf('^')
+            $res = TabExpansion2 -cursorColumn $CursorIndex -inputScript $TestString.Remove($CursorIndex, 1)
+            $res.CompletionMatches[0].CompletionText | Should -BeExactly 'key:'
+        }
+
+        It 'Should complete static method parameter names when the type and method names are in variables' {
+            $Type = [string]
+            $MethodName = "Compare"
+            $TestString = '$Type::$MethodName(^)'
+            $CursorIndex = $TestString.IndexOf('^')
+            $res = TabExpansion2 -cursorColumn $CursorIndex -inputScript $TestString.Remove($CursorIndex, 1)
+            $res.CompletionMatches[0].CompletionText | Should -BeExactly 'strA:'
+            $res.CompletionMatches[1].CompletionText | Should -BeExactly 'strB:'
+        }
+
+        It 'Should complete static method parameter names when the expression is a TypeExpression' {
+            $TestString = '[string]::Compare(^)'
+            $CursorIndex = $TestString.IndexOf('^')
+            $res = TabExpansion2 -cursorColumn $CursorIndex -inputScript $TestString.Remove($CursorIndex, 1)
+            $res.CompletionMatches[0].CompletionText | Should -BeExactly 'strA:'
+            $res.CompletionMatches[1].CompletionText | Should -BeExactly 'strB:'
+        }
+
+        It 'Should complete parameter names for PowerShell defined types' {
+            $TypeDefinitionText = @'
+class BaseType1
+{
+    BaseType1 ([string] $StringParam1){}
+    [void] BaseInstanceMethod([int] $IntParam1){}
+}
+class Type1 : BaseType1
+{
+    Type1 ([string] $StringParam2, [string] $StringParam3) : base($StringParam2){}
+    [void] InstanceMethod([int] $IntParam2){}
+}
+
+'@
+            $TestString = $TypeDefinitionText + '[Type1]::new(^'
+            $CursorIndex = $TestString.IndexOf('^')
+            $res = TabExpansion2 -cursorColumn $CursorIndex -inputScript $TestString.Remove($CursorIndex, 1)
+            $res.CompletionMatches.Count | Should -Be 2
+            $res.CompletionMatches[0].CompletionText | Should -BeExactly 'StringParam2:'
+            $res.CompletionMatches[1].CompletionText | Should -BeExactly 'StringParam3:'
+
+            $TestString = $TypeDefinitionText + '[Type1]::new().BaseInstanceMethod(^'
+            $CursorIndex = $TestString.IndexOf('^')
+            $res = TabExpansion2 -cursorColumn $CursorIndex -inputScript $TestString.Remove($CursorIndex, 1)
+            $res.CompletionMatches[0].CompletionText | Should -BeExactly 'IntParam1:'
+        }
+
+        It 'Should skip method parameter names for parameters that have been specified by their position' {
+            $TestString = '[System.Management.Automation.Language.Parser]::ParseInput("",^'
+            $CursorIndex = $TestString.IndexOf('^')
+            $res = TabExpansion2 -cursorColumn $CursorIndex -inputScript $TestString.Remove($CursorIndex, 1)
+            $res.CompletionMatches.Count | Should -Be 3
+            $res.CompletionMatches[0].CompletionText | Should -BeExactly 'tokens:'
+            $res.CompletionMatches[1].CompletionText | Should -BeExactly 'errors:'
+            $res.CompletionMatches[2].CompletionText | Should -BeExactly 'fileName:'
+        }
+
+        It 'Should skip method parameter names that are in a different method overload, based on the user specified parameters' {
+            $TestString = '[System.IO.DirectoryInfo]::new().EnumerateFiles(searchOption:"",^'
+            $CursorIndex = $TestString.IndexOf('^')
+            $res = TabExpansion2 -cursorColumn $CursorIndex -inputScript $TestString.Remove($CursorIndex, 1)
+            $res.CompletionMatches.Count | Should -Be 1
+            $res.CompletionMatches[0].CompletionText | Should -BeExactly 'searchPattern:'
+        }
+    }
+
     Context "Script name completion" {
         BeforeAll {
             Setup -f 'install-powershell.ps1' -Content ""

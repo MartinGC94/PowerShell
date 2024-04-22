@@ -428,6 +428,25 @@ namespace System.Management.Automation
                     case TokenKind.Identifier:
                         if (!tokenAtCursor.TokenFlags.HasFlag(TokenFlags.TypeName))
                         {
+                            InvokeMemberExpressionAst invokeMember2 = lastAst as InvokeMemberExpressionAst;
+                            if (invokeMember2 is null && lastAst is LabeledExpressionAst labeledExpression)
+                            {
+                                invokeMember2 = (InvokeMemberExpressionAst)labeledExpression.Parent;
+                            }
+
+                            if (invokeMember2 is not null)
+                            {
+                                int colonTokenIndex = Array.IndexOf(_tokens, tokenAtCursor) + 1;
+                                if (colonTokenIndex != _tokens.Length && _tokens[colonTokenIndex].Kind == TokenKind.Colon)
+                                {
+                                    replacementLength = _tokens[colonTokenIndex].Extent.EndOffset - tokenAtCursor.Extent.StartOffset;
+                                }
+
+                                completionContext.WordToComplete = tokenAtCursor.Text;
+                                result = CompletionCompleters.CompleteMethodParameter(invokeMember2, completionContext);
+                                break;
+                            }
+
                             result = CompleteUsingKeywords(completionContext.CursorPosition.Offset, _tokens, ref replacementIndex, ref replacementLength);
                             if (result is not null)
                             {
@@ -561,6 +580,13 @@ namespace System.Management.Automation
 
                             result = CompletionCompleters.CompleteCommandArgument(completionContext);
                         }
+                        else if (lastAst is InvokeMemberExpressionAst invokeMember2)
+                        {
+                            var resultList = CompletionCompleters.CompleteMethodParameter(invokeMember2, completionContext);
+                            replacementIndex++;
+                            replacementLength = 0;
+                            return resultList;
+                        }
                         else if (lastAst is AttributeAst)
                         {
                             completionContext.ReplacementIndex = replacementIndex += tokenAtCursor.Text.Length;
@@ -676,6 +702,13 @@ namespace System.Management.Automation
                                 completionContext.ReplacementIndex = replacementIndex += tokenAtCursor.Text.Length;
                                 completionContext.ReplacementLength = replacementLength = 0;
                                 result = GetResultForAttributeArgument(completionContext, ref replacementIndex, ref replacementLength);
+                            }
+                            else if (lastAst is InvokeMemberExpressionAst invokeMember2)
+                            {
+                                var resultList = CompletionCompleters.CompleteMethodParameter(invokeMember2, completionContext);
+                                replacementIndex++;
+                                replacementLength = 0;
+                                return resultList;
                             }
                             else if (lastAst is HashtableAst hashTableAst && lastAst.Parent is not DynamicKeywordStatementAst && CheckForPendingAssignment(hashTableAst))
                             {
@@ -911,7 +944,7 @@ namespace System.Management.Automation
                         // <Tab>
                         if ((result is null || result.Count == 0) && tokenBeforeCursor is not null)
                         {
-                            switch (completionContext.TokenBeforeCursor.Kind)
+                            switch (tokenBeforeCursor.Kind)
                             {
 
                                 case TokenKind.Dot:
@@ -924,7 +957,11 @@ namespace System.Management.Automation
 
                                 case TokenKind.LParen:
                                 case TokenKind.Comma:
-                                    if (lastAst is AttributeAst)
+                                    if (lastAst is InvokeMemberExpressionAst invokeMember)
+                                    {
+                                        result = CompletionCompleters.CompleteMethodParameter(invokeMember, completionContext);
+                                    }
+                                    else if (lastAst is AttributeAst)
                                     {
                                         result = GetResultForAttributeArgument(completionContext, ref replacementIndex, ref replacementLength);
                                     }
@@ -1000,6 +1037,15 @@ namespace System.Management.Automation
                                         {
                                             completionContext.ReplacementLength = replacementLength = 0;
                                             result = GetResultForAttributeArgument(completionContext, ref replacementIndex, ref replacementLength);
+                                            break;
+                                        }
+
+                                        if (lastAst is InvokeMemberExpressionAst invokeMember2)
+                                        {
+                                            replacementLength = 0;
+                                            replacementIndex = completionContext.CursorPosition.Offset;
+                                            result = CompletionCompleters.CompleteMethodParameter(invokeMember2, completionContext);
+                                            
                                             break;
                                         }
 
